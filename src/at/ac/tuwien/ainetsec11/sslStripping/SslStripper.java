@@ -1,12 +1,18 @@
 package at.ac.tuwien.ainetsec11.sslStripping;
 
+import java.io.BufferedInputStream;
+import java.io.BufferedOutputStream;
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
+import java.io.PrintWriter;
+import java.io.Reader;
+import java.io.StringReader;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.net.URLConnection;
 import java.util.Iterator;
 import java.util.Timer;
 import java.util.TimerTask;
@@ -17,6 +23,9 @@ import javax.net.ssl.SSLServerSocket;
 import javax.net.ssl.SSLServerSocketFactory;
 import javax.net.ssl.SSLSocket;
 
+import sun.net.www.http.HttpClient;
+import sun.rmi.transport.proxy.HttpReceiveSocket;
+
 public class SslStripper {
 
 	public static final int PROXY_PORT = 40034;
@@ -25,11 +34,10 @@ public class SslStripper {
 	 * @param args
 	 */
 	public static void main(String[] args) {
-		SSLServerSocketFactory sslServerSocketFactory = (SSLServerSocketFactory)SSLServerSocketFactory.getDefault();
-		
-		SSLServerSocket serverSocket = null;
+
+		ServerSocket serverSocket = null;
 		try {
-			serverSocket = (SSLServerSocket)sslServerSocketFactory.createServerSocket(PROXY_PORT);
+			serverSocket = new ServerSocket(PROXY_PORT);
 
 		}
 		catch (IOException e) {
@@ -37,26 +45,26 @@ public class SslStripper {
 			return;
 		}
 		MyThreadExecutor executor = MyThreadExecutor.getInstance();
-		executor.execute(new SslSocketDispatcher(serverSocket, PROXY_PORT));
+		executor.execute(new TcpSocketDispatcher(serverSocket, PROXY_PORT));
 
 		System.out.println("Server running...");
 
 		InputStreamReader c = new InputStreamReader(System.in);
-        try
-        {
-            while(c.read() != '\n')
-            {
-                //do nothing
-            }
-            
-            serverSocket.close();
-            c.close();
-        }
-        catch (IOException ex)
-        {
-            
-        }
-        MyThreadExecutor.getThreadExecutor().shutdown();
+		try
+		{
+			while(c.read() != '\n')
+			{
+				//do nothing
+			}
+
+			serverSocket.close();
+			c.close();
+		}
+		catch (IOException ex)
+		{
+
+		}
+		MyThreadExecutor.getThreadExecutor().shutdown();
 	}
 
 }
@@ -73,10 +81,10 @@ class SslStripperFilter extends Filter {
 
 }
 
-class SslSocketDispatcher implements Runnable {
-	private SSLServerSocket socket;
+class TcpSocketDispatcher implements Runnable {
+	private ServerSocket socket;
 	private int port;
-	public SslSocketDispatcher(SSLServerSocket serverSocket, int proxyPort) {
+	public TcpSocketDispatcher(ServerSocket serverSocket, int proxyPort) {
 		socket = serverSocket;
 		port = proxyPort;
 
@@ -84,8 +92,7 @@ class SslSocketDispatcher implements Runnable {
 	public void run() {
 		while(!socket.isClosed()) {
 			try {
-				socket.accept();
-				MyThreadExecutor.getInstance().execute(new StripperThread((SSLSocket)socket.accept(), port));
+				MyThreadExecutor.getInstance().execute(new StripperThread(socket.accept(), port));
 			} catch (SSLException e) {
 				System.err.println(e.getMessage());
 				e.printStackTrace();
@@ -103,41 +110,270 @@ class SslSocketDispatcher implements Runnable {
 		}	
 	}
 }
+class HTTPRequest {
+	private String method;
+	private String resource;
+	private String host;
+	private int port = 80;
+	private String additionalParams;
 
-class StripperThread implements Runnable {
 
-	private SSLSocket socket;
-	private int port;
-	private Vector filterChain;
+	public HTTPRequest(String method, String resource, String host) {
+		super();
+		this.method = method;
+		this.resource = resource;
+		this.host = host;
+	}
 
-	public StripperThread(SSLSocket socket, int port) {
-		this.socket = socket;
+
+
+	public HTTPRequest(String method, String resource, String host, int port, String additionalParams) {
+		super();
+		this.method = method;
+		this.resource = resource;
+		this.host = host;
 		this.port = port;
+		this.additionalParams = additionalParams;
+	}
+
+
+	public String getAdditionalParams() {
+		return additionalParams;
+	}
+
+
+
+	public void setAdditionalParams(String additionalParams) {
+		this.additionalParams = additionalParams;
+	}
+
+
+
+	public String getMethod() {
+		return method;
+	}
+	public void setMethod(String method) {
+		this.method = method;
+	}
+	public String getResource() {
+		return resource;
+	}
+	public void setResource(String resource) {
+		this.resource = resource;
+	}
+	public String getHost() {
+		return host;
+	}
+	public void setHost(String host) {
+		this.host = host;
+	}
+
+
+
+	public int getPort() {
+		return port;
+	}
+
+
+
+	public void setPort(int port) {
+		this.port = port;
+	}
+
+
+
+}
+
+class HTTPRequestParser {
+	private static HTTPRequestParser _instance = new HTTPRequestParser();
+	private String originalRequest;
+
+
+	public static HTTPRequestParser getInstance() {
+		return _instance;
+	}
+
+	private HTTPRequestParser() {
+
+	}
+
+	public HTTPRequest parse(String request) {
+		this.originalRequest = request;
+		BufferedReader reader = new BufferedReader(new StringReader(request));
+		try {
+			String method;
+			String methodLine = reader.readLine();
+			String resource;
+			String hostAndPort;
+			String host;
+			int port;
+			String[] methodLineArray = methodLine.split(" ");
+			if (methodLineArray[0].matches("GET") || methodLineArray[0].matches("POST") || methodLineArray[0].matches("PUT") || methodLineArray[0].matches("DELETE")) {
+				method = methodLineArray[0];
+				resource = methodLineArray[1];
+			}
+			else {
+				throw new IOException("wrong method");
+			}
+
+			String hostLine = reader.readLine();
+			String hostLineArray[] = hostLine.split(" ");
+			if (hostLineArray[0].toLowerCase().compareTo("host:") != 0) {
+				throw new IOException("HOST param missing");
+			}
+
+			hostAndPort = hostLineArray[1];
+			String []hostPortArray = hostAndPort.split(":");
+			if (hostPortArray.length == 1) {
+				host = hostAndPort;
+				port = 80;
+			}
+
+			else if (hostPortArray.length == 2) {
+				host = hostPortArray[0];
+
+				try {
+					port = Integer.parseInt(hostPortArray[1]);
+				}
+				catch (NumberFormatException e) {
+					System.err.println(e.getMessage());
+					throw new IOException(e.getMessage());
+				}
+			}
+			else {
+				throw new IOException("host or port couldn't be parsed");
+			}
+			String additionalParams = "";
+			String readLine;
+			while(true) {
+				readLine = reader.readLine();
+				if (readLine != null) {
+					additionalParams += readLine + "\r\n";
+				}else {
+					break;
+				}
+			}
+
+			return new HTTPRequest(method, resource, host, port, additionalParams);
+
+		}
+		catch (IOException e) {
+
+		}
+		return null;
+	}
+}
+
+class Proxy {
+
+	private Vector filterChain;
+	private Socket socket;
+	private Socket httpSocket;
+	public Proxy(Socket socket) {
+		this.socket = socket;
 		filterChain = new Vector();
 		filterChain.add(new SslStripperFilter());
 	}
 
-	public void run() {
-		try {
-			BufferedReader input = new BufferedReader(new InputStreamReader(socket.getInputStream()));
-			BufferedWriter output = new BufferedWriter(new OutputStreamWriter(socket.getOutputStream()));
-			String inputLine = input.readLine();
-			System.out.println(inputLine);
-			String filteredData = inputLine;
+	private String rewriteRequest(HTTPRequest request) {
+		String rewritten = "";
+		rewritten += request.getMethod() + " " + request.getResource() + " HTTP/1.0\r\n";
+		rewritten += "Host: " + request.getHost()+ "\r\n";
+		rewritten += request.getAdditionalParams();
+		return rewritten;
+	}
 
-			Iterator filterIterator = filterChain.iterator();
-			while (filterIterator.hasNext()) {
-				Filter currentFilter = (Filter)filterIterator.next();
-				filteredData = currentFilter.transform(filteredData);
+	public void proxyConnection() {
+
+		/*Iterator filterIterator = filterChain.iterator();
+		while (filterIterator.hasNext()) {
+			Filter currentFilter = (Filter)filterIterator.next();
+			filteredData = currentFilter.transform(filteredData);
+		}*/
+		BufferedReader input = null;
+		BufferedOutputStream output = null;
+		BufferedInputStream httpConnectionOutput = null;
+		OutputStreamWriter httpConnectionInput = null;
+		try {
+		   input = new BufferedReader(new InputStreamReader(socket.getInputStream()));
+		   output = new BufferedOutputStream(socket.getOutputStream());
+			String inputString = "";
+			byte[] writeBuffer = new byte[65535];
+			while(input.ready()) {
+				inputString += input.readLine() + "\n";
 			}
-			output.write(filteredData);
-			output.close();
-			input.close();
-			socket.close();
+
+			//output.write(inputString);
+				HTTPRequest request = HTTPRequestParser.getInstance().parse(inputString);
+			
+				if (request == null) {
+					System.err.println("parsing error oh noes");
+					output.close();
+					input.close();
+					socket.close();
+
+				}
+				//httpSocket = new Socket(host, port)
+
+				httpSocket = new Socket(request.getHost(), 80);
+				httpSocket.setReceiveBufferSize(65535);
+				//httpSocket.setSoTimeout(10000);
+				
+				httpConnectionOutput = new BufferedInputStream(httpSocket.getInputStream());
+				httpConnectionInput = new OutputStreamWriter(httpSocket.getOutputStream());
+
+				String rewrittenRequest = rewriteRequest(request);
+				httpConnectionInput.write(rewrittenRequest);
+				httpConnectionInput.flush();
+				int toRead;
+				boolean read = false;
+				int availableBytes = 0;
+				
+				while((toRead = httpConnectionOutput.read(writeBuffer)) != -1) {
+					output.write(writeBuffer, 0, toRead);
+				//	System.err.println(new String(writeBuffer));
+					System.err.println(httpConnectionOutput.available());
+					
+				}
+				System.err.println("done file");
+				output.close();
+				input.close();
+				httpConnectionInput.close();
+				httpConnectionOutput.close();
+				httpSocket.close();
+				
 		}
 		catch (IOException e) {
 			System.err.println("unexpected disconnect");
+			System.err.flush();
+			try {
+				output.close();
+				input.close();
+				httpConnectionInput.close();
+				httpConnectionOutput.close();
+				httpSocket.close();
+			}
+			catch (IOException e1) {
+				
+			}
 		}
+
+	}
+}
+
+class StripperThread implements Runnable {
+
+	private Socket socket;
+	private int port;
+
+	public StripperThread(Socket socket, int port) {
+		this.socket = socket;
+		this.port = port;
+	}
+
+	public void run() {
+		Proxy proxy = new Proxy(socket);
+		proxy.proxyConnection();
 	}
 
 }
@@ -147,15 +383,15 @@ interface Executor {
 }
 
 class ExecutorService extends Timer {
-	
+
 	private Vector cachedThreadPool = new Vector();
 	private boolean isShutDown = false;
-	
+
 	public ExecutorService() {
 		super(true);
 		schedule(new ThreadCleanUp(this), 0, 10000);
 	}
-	
+
 	public void execute(Runnable thread) {
 		if (!isShutDown) {
 			Thread currentThread = new Thread(thread);
@@ -165,19 +401,19 @@ class ExecutorService extends Timer {
 			currentThread.start();
 		}
 	}
-	
+
 	public void shutdown() {
 		isShutDown = true;
 	}
-	
+
 	private class ThreadCleanUp extends TimerTask {
-		
+
 		private Timer parentTimer;
-		
+
 		public ThreadCleanUp(Timer parentTimer) {
 			this.parentTimer = parentTimer;
 		}
-		
+
 		public void run() {
 			synchronized(cachedThreadPool) {
 				Iterator cacheIterator = cachedThreadPool.iterator();
@@ -192,7 +428,7 @@ class ExecutorService extends Timer {
 				parentTimer.cancel();
 			}
 		}
-		
+
 	}
 }
 
