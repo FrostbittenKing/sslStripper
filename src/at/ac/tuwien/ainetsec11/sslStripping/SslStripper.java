@@ -98,7 +98,9 @@ class SslStripperFilter extends Filter {
 					 String currentLink = stringBody.substring(currentOccurrance + 9, endLink);
 					 if (currentLink.startsWith("https")) {
 						 String stringBodyBeforeLink = stringBody.substring(0,currentOccurrance + 9);
+						 SocketConnectorFactory.addHost(currentLink);
 						 currentLink = currentLink.replaceFirst("https", "http");
+						
 						 stringBody = stringBodyBeforeLink + currentLink + stringBody.substring(endLink);				 
 					 }
 					 currentOccurrance++;
