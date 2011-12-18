@@ -14,6 +14,7 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.URL;
 import java.net.URLConnection;
+import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Iterator;
@@ -276,8 +277,8 @@ class HTTPRequestParser {
 				}
 				else if (resourceParamsArray.length == 2) {
 					resource = resourceParamsArray[0];
-					params = new HTTPRequestParameters();
-				//	params = new HTTPRequestParameters(resourceParamsArray[1]);
+				//	params = new HTTPRequestParameters();
+					params = new HTTPRequestParameters(resourceParamsArray[1]);
 				}
 				else {
 					throw new IOException("resource/params request could not be parsed");
@@ -319,7 +320,13 @@ class HTTPRequestParser {
 			while(true) {
 				readLine = reader.readLine();
 				if (readLine != null) {
-					additionalParams += readLine + "\r\n";
+					
+					if(!readLine.startsWith("Connection")) {
+						additionalParams += readLine + "\r\n";
+					}
+					else {
+						additionalParams += "Connection: close" + "\r\n";
+					}
 				}else {
 					break;
 				}
@@ -373,14 +380,21 @@ abstract class SocketConnection {
 		socket.setSendBufferSize(65535);
 	}
 	
-	public String read() throws IOException {
+	public byte[] read() throws IOException {
+		
+		byte[] buffer = new byte[0];
+		byte[] backupBuffer;
 		int toRead;
 		String returnData = "";
 		
-		while(input.read(readBuffer) != -1) {
-			returnData += new String(readBuffer);
+		while((toRead = input.read(readBuffer)) != -1) {
+			backupBuffer = buffer;
+			buffer = new byte[buffer.length + toRead];
+			System.arraycopy(backupBuffer, 0, buffer, 0, backupBuffer.length);
+			System.arraycopy(readBuffer,0, buffer, backupBuffer.length, toRead);
+			//retSocket.write(readBuffer, 0, toRead);
 		}
-		return returnData;
+		return buffer;
 	}
 	
 	public void write(String data) throws IOException {
@@ -458,11 +472,11 @@ class Proxy {
 
 	private Vector filterChain;
 	private Socket socket;
-	private Socket httpSocket;
 	public Proxy(Socket socket) {
 		this.socket = socket;
 		filterChain = new Vector();
 		filterChain.add(new SslStripperFilter());
+		
 	}
 
 	private String rewriteRequest(HTTPRequest request) {
@@ -484,21 +498,24 @@ class Proxy {
 			Filter currentFilter = (Filter)filterIterator.next();
 			filteredData = currentFilter.transform(filteredData);
 		}*/
-		BufferedReader input = null;
+		BufferedInputStream input = null;
 		BufferedOutputStream output = null;
-		BufferedInputStream httpConnectionOutput = null;
-		OutputStreamWriter httpConnectionInput = null;
 		SocketConnection connection = null;
 		try {
-			input = new BufferedReader(new InputStreamReader(socket.getInputStream()));
+			socket.setReceiveBufferSize(65535);
+			input = new BufferedInputStream(socket.getInputStream());
 			output = new BufferedOutputStream(socket.getOutputStream());
 			String inputString = "";
-			byte[] writeBuffer = new byte[65535];
-			while(input.ready()) {
-				inputString += input.readLine() + "\n";
+			byte[] readBuffer = new byte[65535];
+			
+			int readChars = 0;
+			int currentAvailable = 0;
+					
+			while((currentAvailable = input.available()) > 0) {
+				readChars = input.read(readBuffer,0,currentAvailable);		
+				inputString += new String(readBuffer).substring(0, readChars);
 			}
 
-			//output.write(inputString);
 			HTTPRequest request = HTTPRequestParser.getInstance().parse(inputString);
 
 			if (request == null) {
@@ -508,53 +525,21 @@ class Proxy {
 				socket.close();
 
 			}
-			/*
+			
 			connection = SocketConnectorFactory.createSocketConnection(request.getHost());
 			
 			String rewrittenRequest = rewriteRequest(request);
 			connection.getInputStream();
 			connection.getOutputStream();
 			connection.write(rewrittenRequest);
-			String retData = connection.read();
-			System.err.println(retData);
-			output.write(retData);
+			byte [] response = connection.read();
+			
+			output.write(response);
 			output.flush();
-			System.err.println("file done");
 			connection.close();
 			output.close();
 			input.close();
-			*/
-		//	httpSocket = new Socket(host, port)
-
 			
-			httpSocket = new Socket(request.getHost(), 80);
-			httpSocket.setReceiveBufferSize(65535);
-			//httpSocket.setSoTimeout(10000);
-
-			httpConnectionOutput = new BufferedInputStream(httpSocket.getInputStream());
-			httpConnectionInput = new OutputStreamWriter(httpSocket.getOutputStream());
-
-			String rewrittenRequest = rewriteRequest(request);
-			httpConnectionInput.write(rewrittenRequest);
-			httpConnectionInput.flush();
-			int toRead;
-			boolean read = false;
-			int availableBytes = 0;
-
-			while((toRead = httpConnectionOutput.read(writeBuffer)) != -1) {
-				output.write(writeBuffer, 0, toRead);
-				//	System.err.println(new String(writeBuffer));
-				System.err.println(httpConnectionOutput.available());
-
-			}
-			System.err.println("done file");
-			output.close();
-			input.close();
-			httpConnectionInput.close();
-			httpConnectionOutput.close();
-			httpSocket.close();
-		
-
 		}
 		catch (IOException e) {
 			System.err.println("unexpected disconnect");
