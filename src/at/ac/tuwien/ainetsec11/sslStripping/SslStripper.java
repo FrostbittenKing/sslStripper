@@ -52,6 +52,7 @@ public class SslStripper {
 			return;
 		}
 		MyThreadExecutor executor = MyThreadExecutor.getInstance();
+		SocketConnectorFactory.addHost("plus.google.com");
 		executor.execute(new TcpSocketDispatcher(serverSocket, PROXY_PORT));
 
 		System.out.println("Server running...");
@@ -80,6 +81,37 @@ abstract class Filter {
 	abstract Object transform(Object data);
 }
 
+class RedirectFilter extends Filter {
+
+	Object transform(Object data) {
+	
+		HTTPResponse response = (HTTPResponse) data;
+		if (response.getStatusCode() >= 300 && response.getStatusCode() < 400) {
+			String location = response.getLocation();
+			String protocol = location.split("://")[0];
+			String withoutProtocol = location.split("://")[1];
+			String [] uriAndLocator = withoutProtocol.split("/",2);
+			String newLocation = "";
+			newLocation = protocol + "://" +  uriAndLocator[0] + ":40034";
+			if (uriAndLocator.length == 2) {
+				 newLocation += "/" + uriAndLocator[1];
+			 }
+			
+			if(newLocation.startsWith("https")) {
+				newLocation = newLocation.replaceFirst("https", "http");
+			}
+			try {
+				response.setLocation(newLocation);
+			}
+			catch (IOException e) {
+				System.err.println("location couldn't be changed");
+			}
+		}
+		return response;
+	}
+	
+}
+
 class SslStripperFilter extends Filter {
 	
 	private static final String HTML_CONTENT_TYPE = "text/html";
@@ -89,18 +121,31 @@ class SslStripperFilter extends Filter {
 		 HTTPResponse response = (HTTPResponse) data;
 		 
 		 try {
-			if (response.getContentType().indexOf(HTML_CONTENT_TYPE) != -1) {
+			 String contentType = response.getContentType();
+			if (contentType != null && contentType.indexOf(HTML_CONTENT_TYPE) != -1) {
 				 String stringBody = new String(response.getBody());
 				 
 				 int currentOccurrance = 0;
 				 while ((currentOccurrance = stringBody.indexOf(LINK_TAG_START,currentOccurrance)) != -1) {
-					 int endLink = stringBody.substring(currentOccurrance + 9).indexOf("\"") + currentOccurrance + 10;	
+					 int endLink = stringBody.substring(currentOccurrance + 9).indexOf("\"") + currentOccurrance + 9;	
 					 String currentLink = stringBody.substring(currentOccurrance + 9, endLink);
-					 if (currentLink.startsWith("https")) {
+					 
+					 
+					 
+					 if (currentLink.startsWith("http")) {
+						// add Port to url
+						 String protocol = currentLink.split("://")[0];
+						 String withoutProtocol = currentLink.split("://")[1];
+						 String [] uriAndLocator = withoutProtocol.split("/",2);
+						 currentLink = protocol + "://" +  uriAndLocator[0] + ":" + SslStripper.PROXY_PORT;
+						 if (uriAndLocator.length == 2) {
+							 currentLink += "/" + uriAndLocator[1];
+						 }
 						 String stringBodyBeforeLink = stringBody.substring(0,currentOccurrance + 9);
-						 SocketConnectorFactory.addHost(currentLink);
-						 currentLink = currentLink.replaceFirst("https", "http");
-						
+						 if (currentLink.startsWith("https")) {
+							 SocketConnectorFactory.addHost(uriAndLocator[0]);
+							 currentLink = currentLink.replaceFirst("https", "http");
+						 }
 						 stringBody = stringBodyBeforeLink + currentLink + stringBody.substring(endLink);				 
 					 }
 					 currentOccurrance++;
@@ -108,6 +153,7 @@ class SslStripperFilter extends Filter {
 				 response.setBody(stringBody.getBytes());
 				 return response;
 			 }
+			
 		} catch (IOException e) {
 			// TODO Auto-generated catch block
 			e.printStackTrace();
@@ -172,6 +218,21 @@ class HTTPResponse {
 	public void setBody(byte[] body) {
 		this.body = body;
 	}
+	
+	public int getStatusCode() {
+		String serverResponseStatusInfo = serverResponseData.split("\\r\\n", 2)[0];
+		String statusCode = serverResponseStatusInfo.split(" ")[1];
+		int code = Integer.parseInt(statusCode);
+		return code;
+	}
+	
+	public void setStatusCode(int code) {
+		String statusInfo[] = serverResponseData.split("\\r\\n",2);
+		String serverResponseHeaders = serverResponseData.split("\\r\\n", 2)[1];
+		
+		String changedInfo = statusInfo[0] + code + statusInfo[2];
+		serverResponseData = changedInfo + "\r\n" + serverResponseHeaders;
+	}
 
 	public String getContentType() throws IOException {
 		BufferedReader headerReader = new BufferedReader(new StringReader(serverResponseData));
@@ -183,6 +244,47 @@ class HTTPResponse {
 		}
 		return null;
 	}
+	
+	private void changeValue(String header, String value) throws IOException {
+		BufferedReader dataReader = new BufferedReader(new StringReader(serverResponseData));
+		
+		String newHeader = "";
+		String currentLine;
+		while ((currentLine = dataReader.readLine()) != null) {
+			if (currentLine.startsWith(header)) {
+				currentLine = header + ": " + value;
+			}
+			newHeader += currentLine + "\r\n";
+		}
+		serverResponseData = newHeader;
+	}
+	
+	private String findValue(String header) throws IOException {
+		BufferedReader dataReader = new BufferedReader(new StringReader(serverResponseData));
+		
+		String currentLine;
+		while ((currentLine = dataReader.readLine()) != null) {
+			if (currentLine.startsWith(header)) {
+				return currentLine.split(":",2)[1].substring(1);
+			}
+		}
+		return null;
+	}
+	
+	public void setLocation(String location) throws IOException {
+		changeValue("Location", location);
+	}
+	
+	public String getLocation()  {
+		try {
+			return findValue("Location");
+			
+		}
+		catch (IOException e) {
+			return null;
+		}
+	}
+	
 	
 	public byte[] getByteArray() {
 		byte[] byteArray = new byte[serverResponseData.length() + body.length];
@@ -714,6 +816,7 @@ class StripperThread implements Runnable {
 	public void run() {
 		Proxy proxy = new Proxy(socket);
 		proxy.afterServerResponse(new SslStripperFilter());
+		proxy.afterServerResponse(new RedirectFilter());
 		proxy.proxyConnection();
 	}
 
